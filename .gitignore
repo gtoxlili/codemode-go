@@ -3,6 +3,10 @@
 go.work
 go.work.sum
 
+# `go build ./...` inside a main package directory drops the executable there.
+/cmd/codemode-mcp/codemode-mcp
+/cmd/codemode-mcp/internal/fixtureserver/fixtureserver
+
 *.test
 *.out
 .idea/
