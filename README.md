@@ -20,11 +20,11 @@ If you are writing an agent in Go, your runtime already has a tool registry — 
 ```go
 bindings := []codemode.Binding{
     {Name: "list_files", Invoke: listFiles},
-    {Name: "read_file",  Invoke: readFile},
-    {Name: "grep",       Invoke: grep},
-    {Name: "write_file", Invoke: writeFile, Mutating: true, ConflictKeys: pathKey},
+    {Name: "read_file",  Invoke: readFile,  ConflictKeys: fileKey},
+    {Name: "grep",       Invoke: grep,      ConflictKeys: fileKey},
+    {Name: "write_file", Invoke: writeFile, ConflictKeys: fileKey, Mutating: true},
 }
-tool := codemode.NewTool(codemode.Options{Bindings: bindings})
+tool, err := codemode.NewTool(codemode.Options{Bindings: bindings})
 ```
 
 and the same capabilities the model reaches one call at a time become something it can program against:
@@ -46,7 +46,9 @@ Two things follow. Independent calls actually run at the same time, because `Pro
 
 The registry is the point. There is no protocol boundary in the middle: a `Binding` is a name and a `func(ctx, argsJSON) (string, error)`, so anything your Go code can call is a tool a program can call.
 
-The two extra fields on `write_file` are what makes fanning out over a mixed batch safe. Your runtime is the only thing that can know a write to `src/a.go` must not overlap a read of the same file — the engine has no schema for your arguments and cannot infer it. Declare it once, and reads of different files still overlap while calls touching the same resource serialize in the order the program issued them. See [scheduling](#scheduling).
+`ConflictKeys` is on the readers as well as the writer, and it has to be: two calls serialize only when both of them name the same resource, so keys on the writer alone buy nothing and the read would still race. Your runtime is the only thing that can know a write to `src/a.go` must not overlap a read of it — the engine has no schema for your arguments and cannot infer it. With every file-touching tool declaring, reads of different files still overlap while calls landing on one file serialize in the order the program issued them. See [scheduling](#scheduling).
+
+One thing to know before wiring it in: the program runs in-process on goja and sees no filesystem, network or imports, but that is capability omission rather than isolation. This is not a security sandbox and is not meant for untrusted or multi-tenant programs; [what a program can see](#what-a-program-can-see) says exactly where the line falls.
 
 Pulled out of an agent that has been running it in production.
 
@@ -81,17 +83,20 @@ Three steps. Bind your tools, mount the tool, teach the model.
 ```go
 import "github.com/gtoxlili/codemode-go"
 
+fileKey := func(args string) []string { return []string{"file:" + pathOf(args)} }
+
 bindings := []codemode.Binding{{
-    Name:   "search_files",
-    Invoke: searchFiles, // func(ctx context.Context, argsJSON string) (string, error)
+    Name:         "read_file",
+    Invoke:       readFile, // func(ctx context.Context, argsJSON string) (string, error)
+    ConflictKeys: fileKey,
 }, {
     Name:         "write_file",
     Invoke:       writeFile,
+    ConflictKeys: fileKey,
     Mutating:     true,
-    ConflictKeys: func(args string) []string { return []string{"file:" + pathOf(args)} },
 }}
 
-tool := codemode.NewTool(codemode.Options{
+tool, err := codemode.NewTool(codemode.Options{
     Bindings: bindings,
     Blocked: []codemode.Blocked{{
         Name:   "ask_user",
@@ -99,6 +104,8 @@ tool := codemode.NewTool(codemode.Options{
     }},
 })
 ```
+
+`NewTool` fails on a name appearing twice across `Bindings` and `Blocked`. The engine keeps the first binding under a name and drops the rest, so a duplicate would silently decide which tool a program reaches, and a name in both lists would have the description call it uncallable while the binding underneath still ran.
 
 `tool` gives you `Name()`, `Description()`, `Parameters()` and `Call(ctx, argsJSON)`, which is what a tool-calling loop needs. `Prompt` returns the matching system-prompt section:
 
@@ -154,7 +161,7 @@ go get github.com/gtoxlili/codemode-go/adapters/eino
 
 ```go
 bindings, err := einocodemode.Bindings(ctx, myTools)
-ct := codemode.NewTool(codemode.Options{Bindings: bindings})
+ct, err := codemode.NewTool(codemode.Options{Bindings: bindings})
 myTools = append(myTools, einocodemode.NewTool(ct))
 ```
 
@@ -176,7 +183,7 @@ bindings = append(bindings, mcpcodemode.Bindings(discovered)...)
 Sixty MCP tools cost sixty schemas per request if they are all in the model's tool list. `Catalog(discovered)` renders them as a text block instead, for the description of a program tool they are reachable from but the tool list does not carry:
 
 ```go
-ct := codemode.NewTool(codemode.Options{
+ct, err := codemode.NewTool(codemode.Options{
     Bindings:    bindings,
     Description: intro + "\n\n" + mcpcodemode.Catalog(discovered),
 })

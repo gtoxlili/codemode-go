@@ -20,11 +20,11 @@
 ```go
 bindings := []codemode.Binding{
     {Name: "list_files", Invoke: listFiles},
-    {Name: "read_file",  Invoke: readFile},
-    {Name: "grep",       Invoke: grep},
-    {Name: "write_file", Invoke: writeFile, Mutating: true, ConflictKeys: pathKey},
+    {Name: "read_file",  Invoke: readFile,  ConflictKeys: fileKey},
+    {Name: "grep",       Invoke: grep,      ConflictKeys: fileKey},
+    {Name: "write_file", Invoke: writeFile, ConflictKeys: fileKey, Mutating: true},
 }
-tool := codemode.NewTool(codemode.Options{Bindings: bindings})
+tool, err := codemode.NewTool(codemode.Options{Bindings: bindings})
 ```
 
 模型原先一次只能触达一个的那些能力,由此变成可以编程的对象:
@@ -46,7 +46,9 @@ return {found: worst.length};
 
 关键在于那份工具表。中间不存在协议边界:一个 `Binding` 就是一个名字加一个 `func(ctx, argsJSON) (string, error)`,Go 代码能调用的东西,程序中都能调用。
 
-`write_file` 上多出的两个字段,是混合批量扇出得以安全执行的前提。只有 runtime 知道对 `src/a.go` 的写入不能与对同一文件的读取重叠,引擎没有工具的参数 schema,无法推断这一点。声明一次之后,读取不同文件依然并行,触及同一资源的调用则按程序发起的顺序串行。详见[调度](#调度)。
+读取方和写入方都声明了 `ConflictKeys`,这是必需的:两个调用只有在**都**指名同一资源时才会串行,只给写入方加 key 换不到任何东西,读取照样和写入并发。只有 runtime 知道对 `src/a.go` 的写入不能与对同一文件的读取重叠,引擎没有工具的参数 schema,无法推断这一点。凡是触及文件的工具都声明之后,读取不同文件依然并行,落在同一个文件上的调用则按程序发起的顺序串行。详见[调度](#调度)。
+
+接入之前需要知道一点:程序在进程内运行 goja,看不到文件系统、网络和 import,但这是能力省略而非隔离。它不是安全沙箱,也不面向不可信或多租户的程序;边界的确切位置见[程序可见的内容](#程序可见的内容)。
 
 本项目从一个已在生产环境运行该能力的 agent 中抽取而来。
 
@@ -81,17 +83,20 @@ go get github.com/gtoxlili/codemode-go
 ```go
 import "github.com/gtoxlili/codemode-go"
 
+fileKey := func(args string) []string { return []string{"file:" + pathOf(args)} }
+
 bindings := []codemode.Binding{{
-    Name:   "search_files",
-    Invoke: searchFiles, // func(ctx context.Context, argsJSON string) (string, error)
+    Name:         "read_file",
+    Invoke:       readFile, // func(ctx context.Context, argsJSON string) (string, error)
+    ConflictKeys: fileKey,
 }, {
     Name:         "write_file",
     Invoke:       writeFile,
+    ConflictKeys: fileKey,
     Mutating:     true,
-    ConflictKeys: func(args string) []string { return []string{"file:" + pathOf(args)} },
 }}
 
-tool := codemode.NewTool(codemode.Options{
+tool, err := codemode.NewTool(codemode.Options{
     Bindings: bindings,
     Blocked: []codemode.Blocked{{
         Name:   "ask_user",
@@ -99,6 +104,8 @@ tool := codemode.NewTool(codemode.Options{
     }},
 })
 ```
+
+`NewTool` 在同一个名字跨 `Bindings` 和 `Blocked` 出现两次时返回错误。引擎对重名只保留第一个绑定、丢弃其余,因此重复会在无人察觉的情况下决定程序实际调到哪个工具;而一个名字同时出现在两个列表里,会让描述声称它不可调用,底下的绑定却照常执行。
 
 `tool` 提供 `Name()`、`Description()`、`Parameters()` 和 `Call(ctx, argsJSON)`,这是一个工具调用循环所需的全部内容。`Prompt` 返回配套的 system prompt 段落:
 
@@ -154,7 +161,7 @@ go get github.com/gtoxlili/codemode-go/adapters/eino
 
 ```go
 bindings, err := einocodemode.Bindings(ctx, myTools)
-ct := codemode.NewTool(codemode.Options{Bindings: bindings})
+ct, err := codemode.NewTool(codemode.Options{Bindings: bindings})
 myTools = append(myTools, einocodemode.NewTool(ct))
 ```
 
@@ -176,7 +183,7 @@ bindings = append(bindings, mcpcodemode.Bindings(discovered)...)
 60 个 MCP 工具若全部进入模型的 tool list,即为每轮 60 份 schema。`Catalog(discovered)` 将它们渲染为一段文本,用于"程序可调用、但 tool list 不携带"这类工具的描述:
 
 ```go
-ct := codemode.NewTool(codemode.Options{
+ct, err := codemode.NewTool(codemode.Options{
     Bindings:    bindings,
     Description: intro + "\n\n" + mcpcodemode.Catalog(discovered),
 })
