@@ -21,6 +21,12 @@
 // arguments, and a Call method taking the raw argument JSON. Framework adapters
 // live in ./adapters and are separate modules.
 //
+// Mounting it is additive. The model's tool list does not change and its tools
+// keep working as direct calls; it gains one more tool, and with it a second
+// way to reach the same capabilities. The description says so as a set relation
+// rather than by listing anything, so the schemas the model already has are not
+// paid for twice.
+//
 // [Prompt] returns the system-prompt section describing how to write a program
 // against the bound tools.
 //

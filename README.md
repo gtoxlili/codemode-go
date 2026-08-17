@@ -5,7 +5,7 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/gtoxlili/codemode-go)](https://goreportcard.com/report/github.com/gtoxlili/codemode-go)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**Programmatic tool calling for Go agents.** Turn the tools your runtime already has into a JavaScript API the model writes programs against, instead of one tool call per turn — without changing your agent framework.
+**Programmatic tool calling for Go agents.** Not a replacement for tool calling — a second execution strategy for the tools you already have. Direct calls keep working exactly as they do; the model also gets to write one JavaScript program that calls many of them and returns a digest. No new agent loop, no rewriting tools into another API, nothing hidden behind a runtime.
 
 [中文文档](README.zh-CN.md)
 
@@ -46,6 +46,8 @@ Two things follow. Independent calls actually run at the same time, because `Pro
 
 The registry is the point. There is no protocol boundary in the middle: a `Binding` is a name and a `func(ctx, argsJSON) (string, error)`, so anything your Go code can call is a tool a program can call.
 
+Mounting it is additive. Your tools stay in the model's tool list and keep working as direct calls; the model gains one more tool, and with it a second way to reach the same capabilities. The generated description says that as a set relation — *the tools callable in a program are exactly those in your current tool list, minus this one and minus what you blocked* — so nothing re-lists schemas the model already has, and adding a tool later costs nothing here. What that leaves on you: `Bindings` has to match what you actually mounted, because nothing in this library can see your tool list.
+
 `ConflictKeys` is on the readers as well as the writer, and it has to be: two calls serialize only when both of them name the same resource, so keys on the writer alone buy nothing and the read would still race. Your runtime is the only thing that can know a write to `src/a.go` must not overlap a read of it — the engine has no schema for your arguments and cannot infer it. With every file-touching tool declaring, reads of different files still overlap while calls landing on one file serialize in the order the program issued them. See [scheduling](#scheduling).
 
 One thing to know before wiring it in: the program runs in-process on goja and sees no filesystem, network or imports, but that is capability omission rather than isolation. This is not a security sandbox and is not meant for untrusted or multi-tenant programs; [what a program can see](#what-a-program-can-see) says exactly where the line falls.
@@ -56,7 +58,7 @@ Pulled out of an agent that has been running it in production.
 
 Code mode gives the model one tool that runs a program, and exposes the rest of its tools as an API that program can call. It goes by several names: [Anthropic](https://www.anthropic.com/engineering/code-execution-with-mcp) calls it code execution with MCP, [Cloudflare](https://blog.cloudflare.com/code-mode/) calls it Code Mode, the [CodeAct paper](https://arxiv.org/abs/2402.01030) calls it code-as-action.
 
-This one is a library you embed in your own runtime. The tools being projected are your own primitives, MCP is just one of the places they can come from, and your agent loop is untouched. See [how it compares](#how-it-compares).
+Most of what carries the name replaces tool calling with it: the model gets one `execute_code` tool and the rest disappear behind it. This one does not. It is a library you embed, the tools being projected are your own primitives, MCP is just one of the places they can come from, and the agent loop stays yours — the model keeps every tool it had and gains a second way to reach them. See [how it compares](#how-it-compares).
 
 ## Why
 
@@ -180,7 +182,9 @@ discovered, err := mcpcodemode.Tools(ctx, mcpClient)
 bindings = append(bindings, mcpcodemode.Bindings(discovered)...)
 ```
 
-Sixty MCP tools cost sixty schemas per request if they are all in the model's tool list. `Catalog(discovered)` renders them as a text block instead, for the description of a program tool they are reachable from but the tool list does not carry:
+That is the ordinary wiring, and it stays additive: the MCP tools are in the model's tool list, still directly callable, and now also reachable from a program.
+
+There is a second wiring for the case where sixty MCP tools in the tool list cost sixty schemas per request and most of them are cold. Take them out of the tool list, and hand the model `Catalog(discovered)` in the program tool's description instead — a text listing costs far less than sixty tool definitions, at the price of those tools no longer being directly callable:
 
 ```go
 ct, err := codemode.NewTool(codemode.Options{
@@ -284,6 +288,10 @@ Conflicts are pruned as soon as a call finishes, since two calls can only confli
 No. It is a library for the agent you are building, not a server you register with someone else's client.
 
 That form does exist elsewhere, and it is structurally limited in a way worth knowing about: MCP is asymmetric. A server exposes tools; a client exposes roots, sampling and elicitation. Nothing in the protocol lets a server call back into the client, so a gateway can never touch Claude Code's Read, Edit or Bash — only the upstream servers it dials itself. Getting value from one means moving your MCP servers behind it and giving up calling them directly. That is a reasonable trade when a pile of MCP tools is your whole problem, and the wrong shape for making a runtime's own primitives programmable.
+
+### Do my tools leave the model's tool list?
+
+No. Mounting this adds one tool and changes nothing else; every tool the model had stays mounted and directly callable, and the program tool simply says that those same tools are also reachable from a program. Taking tools out of the tool list is a separate thing you can choose to do with the MCP adapter's `Catalog`, and it is a trade — cheaper per turn, no longer directly callable.
 
 ### Is this a security sandbox?
 

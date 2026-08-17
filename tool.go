@@ -21,10 +21,14 @@ type Blocked struct {
 
 // Options configures [NewTool].
 type Options struct {
-	// Bindings are the tools a program may call. Required.
+	// Bindings are the tools a program may call, and the execution side of the
+	// contract: they map a name a program writes onto the Go function behind
+	// it. They are not what tells the model those tools exist — it already
+	// knows them from its own tool list. See [NewTool] for the alignment the
+	// two sides require.
 	Bindings []Binding
 
-	// Blocked are tools the model has but a program may not call.
+	// Blocked are tools the model has mounted but a program may not call.
 	Blocked []Blocked
 
 	// Name defaults to [DefaultToolName].
@@ -68,9 +72,22 @@ type Tool struct {
 	logTailBytes int
 }
 
-// NewTool assembles the tool. The generated description enumerates Bindings and
-// Blocked as they are at this moment, so it is a snapshot: a tool added to the
-// model's tool list afterwards is not in it.
+// NewTool assembles the tool.
+//
+// The generated description does not enumerate Bindings. It states a set
+// relation — the tools a program can call are the ones already in the model's
+// tool list, minus this tool and minus Blocked — which is why mounting this
+// costs one tool description and not a second copy of every schema the model
+// already has.
+//
+// That leaves one obligation on the caller: Bindings has to match what the
+// model actually has mounted, minus Blocked. Bind less and the description
+// over-promises, and the model reaches for a tool that answers "unknown tool";
+// bind more and a program can reach capabilities the model was never shown.
+// Nothing here can check that, because nothing here knows the tool list.
+//
+// Blocked is the escape hatch for the difference that is intentional: a tool
+// that is mounted and must not be callable from a program.
 //
 // It fails on a name that appears twice across Bindings and Blocked, since
 // there is no reading of that under which the description and the behavior

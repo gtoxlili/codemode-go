@@ -5,7 +5,7 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/gtoxlili/codemode-go)](https://goreportcard.com/report/github.com/gtoxlili/codemode-go)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**面向 Go agent 的可编程工具调用。** 把 runtime 中已有的工具投影成一套 JavaScript API,由模型编写程序来调用,而不是一轮只发一次工具调用。无需替换现有的 agent 框架。
+**面向 Go agent 的可编程工具调用。** 它不取代工具调用,而是为你已有的工具增加第二种执行策略。直连调用照常工作,模型同时还能写一段 JavaScript 程序,在其中调用其中许多个,只带回一份归并结果。不需要换 agent 循环,不需要把工具改写成另一套 API,也不需要把任何东西藏到某个 runtime 后面。
 
 [English](README.md)
 
@@ -46,6 +46,8 @@ return {found: worst.length};
 
 关键在于那份工具表。中间不存在协议边界:一个 `Binding` 就是一个名字加一个 `func(ctx, argsJSON) (string, error)`,Go 代码能调用的东西,程序中都能调用。
 
+挂载它是增量的。你的工具仍然留在模型的 tool list 中,直连调用照常可用;模型多了一个工具,也就多了一条触达同一批能力的路径。自动生成的描述是用集合关系表达这件事的:*程序中可调用的工具,正是你当前 tool list 中的那些,减去这一个,再减去被排除的*。所以模型已经拥有的 schema 不会被重列一遍,之后新增工具在这里也不产生成本。由此留给你一项义务:`Bindings` 必须与你实际挂载的工具对齐,因为这个库看不到你的 tool list。
+
 读取方和写入方都声明了 `ConflictKeys`,这是必需的:两个调用只有在**都**指名同一资源时才会串行,只给写入方加 key 换不到任何东西,读取照样和写入并发。只有 runtime 知道对 `src/a.go` 的写入不能与对同一文件的读取重叠,引擎没有工具的参数 schema,无法推断这一点。凡是触及文件的工具都声明之后,读取不同文件依然并行,落在同一个文件上的调用则按程序发起的顺序串行。详见[调度](#调度)。
 
 接入之前需要知道一点:程序在进程内运行 goja,看不到文件系统、网络和 import,但这是能力省略而非隔离。它不是安全沙箱,也不面向不可信或多租户的程序;边界的确切位置见[程序可见的内容](#程序可见的内容)。
@@ -56,7 +58,7 @@ return {found: worst.length};
 
 给模型一个用于运行程序的工具,并把其余工具作为 API 暴露给这段程序。这一做法有多个名称:[Anthropic](https://www.anthropic.com/engineering/code-execution-with-mcp) 称之为 code execution with MCP,[Cloudflare](https://blog.cloudflare.com/code-mode/) 称之为 Code Mode,[CodeAct 论文](https://arxiv.org/abs/2402.01030)称之为 code-as-action。
 
-本项目是嵌入自有 runtime 的库。被投影的是你自己的原语,MCP 只是这些原语可能的来源之一,agent 循环无需改动。详见[横向对比](#横向对比)。
+顶着这个名字的实现多数是拿它取代工具调用:模型只剩一个 `execute_code`,其余工具全部隐到它后面。本项目不是。它是嵌入自有 runtime 的库,被投影的是你自己的原语,MCP 只是这些原语可能的来源之一,agent 循环仍归你所有;模型保留原有的每一个工具,只是多了一条触达它们的路径。详见[横向对比](#横向对比)。
 
 ## 解决什么问题
 
@@ -180,7 +182,9 @@ discovered, err := mcpcodemode.Tools(ctx, mcpClient)
 bindings = append(bindings, mcpcodemode.Bindings(discovered)...)
 ```
 
-60 个 MCP 工具若全部进入模型的 tool list,即为每轮 60 份 schema。`Catalog(discovered)` 将它们渲染为一段文本,用于"程序可调用、但 tool list 不携带"这类工具的描述:
+这是常规接法,并且同样是增量的:这些 MCP 工具在模型的 tool list 中,直连调用仍然可用,同时也能从程序里触达。
+
+另有一种接法,适用于 60 个 MCP 工具全在 tool list 里、每轮付 60 份 schema 而其中多数用不上的情形。把它们移出 tool list,改用 `Catalog(discovered)` 写进程序工具的描述:一段文本列表远比 60 份工具定义便宜,代价是这些工具不再能直连调用。
 
 ```go
 ct, err := codemode.NewTool(codemode.Options{
@@ -284,6 +288,10 @@ key 由工具自行计算,而非由运行时计算。运行时不认识任何工
 不是。它是供你正在编写的 agent 使用的库,而不是注册进他人客户端的 server。
 
 那种形态确实存在于别处,并且有一个值得了解的结构性限制:MCP 是不对称的。server 侧暴露 tools,client 侧暴露 roots / sampling / elicitation,协议中没有任何机制允许 server 反向调用 client。因此网关无法触达 Claude Code 的 Read、Edit 或 Bash,只能编排它自己连接的上游 server;而要从网关获得收益,就需要把 MCP server 全部移到它之后,同时放弃直连。若一批 MCP 工具就是全部问题所在,这笔交易是合理的;但对于"把 runtime 自身的原语变为可编程"这个目标,它并不适用。
+
+### 我的工具会从模型的 tool list 里消失吗
+
+不会。挂载它只是增加一个工具,其余一切不变;模型原有的每个工具仍然挂载着、仍然可以直连调用,程序工具只是告诉模型这些工具同时也能从程序里触达。把工具移出 tool list 是另一回事,是你可以用 MCP 适配器的 `Catalog` 主动选择的做法,而那是一笔交易:每轮更便宜,但不再能直连调用。
 
 ### 这是安全沙箱吗
 
