@@ -106,7 +106,7 @@ func ExampleNewTool() {
 	fmt.Println(out, err)
 	// Output:
 	// run_code
-	// Runs one JavaScript program that orchestrates your tools in batch; only what the program prints or returns comes back to the conversation. The tools callable in a program are exactly those in your current tool list, minus: run_code, ask_user. Reach for it when a batch of calls collapses into one digest — parallel fan-out, chained transforms, filtering bulk results down to what matters; a lone call is cheaper made directly.
+	// Runs one JavaScript program that orchestrates your tools in batch; only what the program prints or returns comes back to the conversation. The tools callable in a program are exactly those in your current tool list, minus: run_code, ask_user. Reach for it when the steps between calls are computable from the results themselves — parallel fan-out, chained transforms, branching or retrying mid-program, filtering bulk results down to what matters; a lone call is cheaper made directly.
 	// {"logs":[],"result":84} <nil>
 }
 

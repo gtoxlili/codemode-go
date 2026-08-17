@@ -2,7 +2,6 @@ package codemode
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"runtime"
@@ -60,6 +59,10 @@ type engineResult struct {
 // Every run gets a fresh VM and no state survives it. Canceling ctx settles the
 // run as FailureAborted and aborts sub-calls that are still in flight.
 //
+// opts supply the host's JSON codec and warning logger; both default, so an
+// agent with no opinion about either passes nothing. See [WithCodec] and
+// [WithLogger].
+//
 // Two bindings sharing a name is a caller error this level cannot report: the
 // first wins and the rest are dropped. [NewTool] rejects that case instead.
 //
@@ -73,8 +76,9 @@ type engineResult struct {
 //     hang the caller's request instead of one cleanup goroutine.
 //   - Every path that ends the run goes through one sync.Once. First one wins,
 //     the rest are no-ops.
-func Run(ctx context.Context, code string, bindings []Binding, limits Limits) (Result, *Failure) {
+func Run(ctx context.Context, code string, bindings []Binding, limits Limits, opts ...RunOption) (Result, *Failure) {
 	limits = limits.withDefaults()
+	dep := resolveDeps(opts)
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -92,7 +96,7 @@ func Run(ctx context.Context, code string, bindings []Binding, limits Limits) (R
 	}
 
 	logs := newLogCollector(limits)
-	sched := newScheduler(runCtx, limits)
+	sched := newScheduler(runCtx, limits, dep)
 
 	settle := make(chan engineResult, 1)
 	done := make(chan struct{})
@@ -333,7 +337,7 @@ func Run(ctx context.Context, code string, bindings []Binding, limits Limits) (R
 				}
 				runOnLoop(func(vm *goja.Runtime) {
 					var v any
-					if err := json.Unmarshal([]byte(r.out), &v); err != nil {
+					if err := dep.unmarshalString(r.out, &v); err != nil {
 						// A tool's contract is text, not necessarily JSON. If it
 						// does not parse, hand the program the raw string rather
 						// than calling the tool broken.

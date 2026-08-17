@@ -140,6 +140,26 @@ codemode.Options{
 
 Both run inline on the goroutine making the call, so a slow observer slows the program down. Events carry the raw arguments, not a digest.
 
+### JSON and logging
+
+Both default to the standard library and need nothing from you. Replace them when your runtime has already made the decision elsewhere:
+
+```go
+codemode.Options{
+    Bindings: bindings,
+    Codec:    sonicCodec{},   // Marshal + Unmarshal, encoding/json's signatures
+    Logger:   func(ctx context.Context, msg string, attrs ...any) {
+        myLogger.FromContext(ctx).Warn(msg, attrs...)
+    },
+}
+```
+
+`Run` takes the same two as trailing options — `codemode.WithCodec(c)`, `codemode.WithLogger(l)` — so an agent calling the engine directly is not forced through `NewTool`.
+
+The reason to pass a codec is agreement, not speed. Your tools serialize their results with something; the engine decodes those results before a program sees them. If the two disagree — on how a large integer survives a round trip, on unknown fields, on invalid UTF-8 — then `r.data.x` inside a program is not quite the value the model would have read from a direct call. Handing the engine the codec your tools already use removes that gap. A codec that also has `UnmarshalString(string, any) error` gets used through it: tool results arrive as strings, and the fallback copies each one into a fresh `[]byte` before parsing.
+
+`Logger` receives internal warnings — today there is exactly one, a tool's `ConflictKeys` panicking, which is reported rather than raised because it is a bug in the tool and not in the program. It takes a context because the warning belongs to one run inside one request, and a host that correlates logs by trace or tenant reads that from there.
+
 ### Return-shape hints
 
 Tool protocols ship the input schema and say nothing about the output, so a program navigating `r.data.hits` is working from a guess. `ReturnShape` derives a compact hint from a Go result type, meant for the tail of a tool description:

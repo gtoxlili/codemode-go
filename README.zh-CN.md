@@ -140,6 +140,26 @@ codemode.Options{
 
 两个回调都在发起调用的 goroutine 上同步执行,回调过慢会拖慢程序。事件携带的是原始入参,不是摘要。
 
+### JSON 与日志
+
+两者都默认走标准库,不配也能跑。当你的运行时已经在别处做过这个选择时再替换:
+
+```go
+codemode.Options{
+    Bindings: bindings,
+    Codec:    sonicCodec{},   // Marshal + Unmarshal,签名同 encoding/json
+    Logger:   func(ctx context.Context, msg string, attrs ...any) {
+        myLogger.FromContext(ctx).Warn(msg, attrs...)
+    },
+}
+```
+
+`Run` 接受同样这两项作为尾部可选参数 —— `codemode.WithCodec(c)`、`codemode.WithLogger(l)` —— 直接调引擎的 agent 不必绕 `NewTool`。
+
+传入 codec 的理由是一致性,不是速度。你的工具用某个实现序列化结果,引擎在程序看到它们之前解码这些结果。两者不一致时 —— 大整数如何往返、未知字段是否报错、非法 UTF-8 怎么处理 —— 程序里的 `r.data.x` 就不再等于模型直连时读到的那个值。把工具已经在用的 codec 交给引擎,这道缝就没了。codec 若同时实现 `UnmarshalString(string, any) error`,引擎走这条路:工具结果本来就是字符串,回退路径要把每个结果先拷进一份新的 `[]byte` 再解析。
+
+`Logger` 接收引擎的内部告警 —— 目前只有一条:某个工具的 `ConflictKeys` panic 了。它被上报而不是抛出,因为那是工具的 bug 不是程序的。它带 context,因为这条告警属于某个请求里的某次运行,按 trace 或租户做日志关联的宿主要从那里读。
+
 ### 返回形状提示
 
 工具协议只下发入参 schema,返回结构对模型不可见,因此程序中写 `r.data.hits` 属于猜测。`ReturnShape` 从 Go 返回类型推导出一行紧凑提示,用于工具描述的末尾:

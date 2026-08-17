@@ -19,6 +19,13 @@ type PromptOptions struct {
 // a program, what a call resolves to, what a failed call rejects with, what runs
 // in parallel, and that only the return value and console output come back.
 //
+// The closing frames a program as control flow rather than as a batch pipeline,
+// and draws the line the model actually has to judge: a step computable from
+// data already in hand belongs in the program, a step that needs judgment about
+// the content belongs in the conversation. That line is also an honest contract
+// — there is no point inside a program where the model gets to look, so a
+// judgment call written into one can only become pre-committed logic.
+//
 // It is written in the second person and formatted as a "# Heading" block, the
 // usual shape of an agent system prompt section.
 func Prompt(opts PromptOptions) string {
@@ -39,10 +46,14 @@ func Prompt(opts PromptOptions) string {
 	b.WriteString("- Independent read-only calls run in parallel; calls that write the same resource run one at a time, in submission order. A call fired without `await` still runs — its failure surfaces as an `[unhandled rejection]` log line.\n")
 	b.WriteString("- The environment is plain JavaScript. Beyond the language built-ins exactly four names exist: `tools`, `ToolCallError`, `console` (log/info/warn/error/debug — all land in the same log channel), and `await sleep(ms)` — the one way to wait (backoff, pacing; the `setTimeout` family does not exist). No filesystem, network, or import — every external effect goes through `tools`.\n")
 	b.WriteString("- Only what the program `return`s or `console.log`s comes back to you — intermediate tool results never enter the conversation, so put what the next step needs into the return value or a few log lines.\n\n")
-	b.WriteString("Chaining is the point — results are ordinary JSON values you can transform between calls:\n\n")
+	b.WriteString("A program is control flow: chain calls, branch on intermediate results, retry with backoff, keep running state, or wrap a call sequence in a local helper and map it over a list — any decision computable from data already in hand (a count, a score, a status field) runs in place, with no conversation round trip. A decision that needs your judgment on the content itself — weighing quality, choosing direction, anything you'd want to read first — lives in the conversation: have the program return the evidence and take the next step directly.\n\n")
 	b.WriteString("```js\n")
 	b.WriteString("const found = await tools.search_files({query: \"slogan|tagline\"});\n")
-	b.WriteString("const top = found.data.hits.slice(0, 20);              // merge / filter / score in code\n")
+	b.WriteString("let top = found.data.hits.slice(0, 20);                // merge / filter / score in code\n")
+	b.WriteString("if (top.length < 5) {                                  // branch on data mid-program\n")
+	b.WriteString("  const more = await tools.search_files({query: \"voice|tone\"});\n")
+	b.WriteString("  top = top.concat(more.data.hits);\n")
+	b.WriteString("}\n")
 	b.WriteString("await tools.write_file({path: \"voice-digest.md\",\n")
 	b.WriteString("  content: top.map(h => \"- \" + h.path + \":\" + h.line + \" \" + h.snippet).join(\"\\n\")});\n")
 	b.WriteString("return {digestEntries: top.length};\n")

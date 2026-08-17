@@ -3,7 +3,6 @@ package codemode
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"sync"
 )
 
@@ -42,6 +41,7 @@ type priorSubmit struct {
 type scheduler struct {
 	ctx         context.Context
 	limits      Limits
+	deps        deps
 	mu          sync.Mutex
 	queued      []*subCall
 	prior       []*priorSubmit
@@ -51,8 +51,8 @@ type scheduler struct {
 	failedLimit bool
 }
 
-func newScheduler(ctx context.Context, limits Limits) *scheduler {
-	return &scheduler{ctx: ctx, limits: limits}
+func newScheduler(ctx context.Context, limits Limits, d deps) *scheduler {
+	return &scheduler{ctx: ctx, limits: limits, deps: d}
 }
 
 func (s *scheduler) Submit(b Binding, args string) (<-chan subResult, error) {
@@ -68,7 +68,7 @@ func (s *scheduler) Submit(b Binding, args string) (<-chan subResult, error) {
 	}
 	s.submitted++
 
-	keys := conflictKeysOf(b, args)
+	keys := conflictKeysOf(s.ctx, s.deps, b, args)
 	entry := &priorSubmit{keys: keys, mutating: b.Mutating}
 	c := &subCall{
 		binding:   b,
@@ -144,15 +144,16 @@ func safeInvoke(ctx context.Context, b Binding, args string) (out string, err er
 }
 
 // conflictKeysOf collects a call's keys, dropping empties and duplicates. A
-// panic here is a bug in the host's tool, not in the program, so it is logged
-// and the call is scheduled as conflict-free rather than failing the run.
-func conflictKeysOf(b Binding, args string) (keys []string) {
+// panic here is a bug in the host's tool, not in the program, so it is reported
+// to the host's logger and the call is scheduled as conflict-free rather than
+// failing the run.
+func conflictKeysOf(ctx context.Context, d deps, b Binding, args string) (keys []string) {
 	if b.ConflictKeys == nil {
 		return nil
 	}
 	defer func() {
 		if r := recover(); r != nil {
-			slog.Warn("codemode: ConflictKeys panicked, scheduling the sub-call as conflict-free",
+			d.logger(ctx, "codemode: ConflictKeys panicked, scheduling the sub-call as conflict-free",
 				"tool", b.Name, "panic", r)
 			keys = nil
 		}

@@ -57,6 +57,16 @@ type Options struct {
 	// LogTailBytes is how much captured output is attached to a failure.
 	// Defaults to 8000.
 	LogTailBytes int
+
+	// Codec is the JSON implementation for this tool's arguments, its result,
+	// and every sub-call result a program sees. Defaults to encoding/json; pass
+	// the one your tools already serialize through so a program reads the same
+	// values a direct call would. See [Codec].
+	Codec Codec
+
+	// Logger receives the engine's internal warnings. Defaults to slog.Default.
+	// See [Logger].
+	Logger Logger
 }
 
 // Tool is the run_code tool: a name, a description, an argument schema, and a
@@ -70,6 +80,8 @@ type Tool struct {
 	slots        chan struct{}
 	onProgram    func(ctx context.Context, code, description string)
 	logTailBytes int
+	deps         deps
+	runOpts      []RunOption
 }
 
 // NewTool assembles the tool.
@@ -146,8 +158,12 @@ func NewTool(opts Options) (*Tool, error) {
 
 	desc := opts.Description
 	if desc == "" {
-		desc = describe(name, opts.Blocked)
+		desc = Describe(name, opts.Blocked)
 	}
+
+	// Resolved once and kept alongside the options that produced it: Call needs
+	// the codec directly, Run needs it in the form Run takes.
+	runOpts := []RunOption{WithCodec(opts.Codec), WithLogger(opts.Logger)}
 
 	return &Tool{
 		name:         name,
@@ -157,20 +173,29 @@ func NewTool(opts Options) (*Tool, error) {
 		slots:        make(chan struct{}, runs),
 		onProgram:    opts.OnProgram,
 		logTailBytes: tail,
+		deps:         resolveDeps(runOpts),
+		runOpts:      runOpts,
 	}, nil
 }
 
-// describe states what the tool is, which tools a program may call, and when to
-// reach for it.
+// Describe is the generated tool description: what the tool is, which tools a
+// program may call, and when to reach for it. [NewTool] uses it unless
+// [Options.Description] overrides it.
+//
+// It is exported for the host that cannot use [NewTool] — one whose bindings are
+// built per run, or that wraps the engine in its own tool type — and would
+// otherwise keep a second copy of this text and watch it drift.
 //
 // The "minus" list leads with the tool's own name. The sentence is an exact
 // claim — callable set equals current tool list minus this list — and the tool
 // is in the model's tool list while being uncallable from a program, so leaving
-// it out would make the claim false.
+// it out would make the claim false. An entry in blocked whose name equals name
+// is ignored rather than repeated.
 //
-// Selection is described by mechanism (fan-out, chaining, filtering) rather
-// than by a call-count threshold, which models follow literally.
-func describe(name string, blocked []Blocked) string {
+// Selection is framed by what makes a program worth writing — the steps between
+// calls being computable from the results — rather than by a call-count
+// threshold, which models follow literally.
+func Describe(name string, blocked []Blocked) string {
 	minus := make([]string, 0, len(blocked)+1)
 	minus = append(minus, name)
 	for _, b := range blocked {
@@ -180,7 +205,7 @@ func describe(name string, blocked []Blocked) string {
 	}
 	return "Runs one JavaScript program that orchestrates your tools in batch; only what the program prints or returns comes back to the conversation. " +
 		"The tools callable in a program are exactly those in your current tool list, minus: " + strings.Join(minus, ", ") + ". " +
-		"Reach for it when a batch of calls collapses into one digest — parallel fan-out, chained transforms, filtering bulk results down to what matters; a lone call is cheaper made directly."
+		"Reach for it when the steps between calls are computable from the results themselves — parallel fan-out, chained transforms, branching or retrying mid-program, filtering bulk results down to what matters; a lone call is cheaper made directly."
 }
 
 func (t *Tool) Name() string        { return t.name }
@@ -208,7 +233,7 @@ func (t *Tool) Parameters() map[string]any {
 // ParametersJSON is [Tool.Parameters] marshaled, for the many APIs that want
 // the schema as bytes.
 func (t *Tool) ParametersJSON() json.RawMessage {
-	b, _ := json.Marshal(t.Parameters())
+	b, _ := t.deps.codec.Marshal(t.Parameters())
 	return b
 }
 
@@ -225,7 +250,7 @@ type toolArgs struct {
 // and the tail of whatever the program printed, phrased for the model to read.
 func (t *Tool) Call(ctx context.Context, argsJSON string) (string, error) {
 	var args toolArgs
-	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+	if err := t.deps.unmarshalString(argsJSON, &args); err != nil {
 		return "", fmt.Errorf("invalid arguments: %w", err)
 	}
 	if strings.TrimSpace(args.Code) == "" {
@@ -243,7 +268,7 @@ func (t *Tool) Call(ctx context.Context, argsJSON string) (string, error) {
 		}
 		return "", fmt.Errorf("%s", msg)
 	}
-	out, err := json.Marshal(res)
+	out, err := t.deps.codec.Marshal(res)
 	if err != nil {
 		return "", fmt.Errorf("serializing the run result: %w", err)
 	}
@@ -260,5 +285,5 @@ func (t *Tool) Run(ctx context.Context, code string) (Result, *Failure) {
 	case <-ctx.Done():
 		return Result{}, &Failure{Kind: FailureAborted, Message: "canceled while waiting for a run slot"}
 	}
-	return Run(ctx, code, t.bindings, t.limits)
+	return Run(ctx, code, t.bindings, t.limits, t.runOpts...)
 }
