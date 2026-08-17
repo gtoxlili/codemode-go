@@ -36,6 +36,13 @@ func testClient(t *testing.T) *client.Client {
 			return mcp.NewToolResultError("upstream is down"), nil
 		},
 	)
+	// Hyphens are ordinary in MCP tool names and illegal after a dot in JS.
+	s.AddTool(
+		mcp.NewTool("get-issue", mcp.WithDescription("Fetch an issue")),
+		func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			return mcp.NewToolResultText(`{"issue":7}`), nil
+		},
+	)
 
 	c, err := client.NewInProcessClient(s)
 	if err != nil {
@@ -57,7 +64,7 @@ func TestProgramFansOutOverMCPTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tools: %v", err)
 	}
-	if len(discovered) != 2 {
+	if len(discovered) != 3 {
 		t.Fatalf("discovered %d tools", len(discovered))
 	}
 
@@ -106,6 +113,44 @@ func TestCatalogCarriesNamesDescriptionsAndSchemas(t *testing.T) {
 	for _, want := range []string{"## score", "Score one candidate", `"id"`, "## always_fails"} {
 		if !strings.Contains(cat, want) {
 			t.Errorf("catalog is missing %q:\n%s", want, cat)
+		}
+	}
+	// The catalog lists the name a program writes, not the name on the wire.
+	if !strings.Contains(cat, "## get_issue") || strings.Contains(cat, "## get-issue") {
+		t.Errorf("catalog should list the callable identifier:\n%s", cat)
+	}
+}
+
+// A hyphenated MCP tool name has to reach the program as an identifier, and the
+// call still has to go out under the name the server registered.
+func TestHyphenatedToolNamesAreCallable(t *testing.T) {
+	ctx := context.Background()
+	discovered, err := Tools(ctx, testClient(t))
+	if err != nil {
+		t.Fatalf("tools: %v", err)
+	}
+
+	ct := codemode.NewTool(codemode.Options{Bindings: Bindings(discovered)})
+	out, err := ct.Call(ctx, `{"code":"const r = await tools.get_issue({}); return r.issue;","description":"Fetch one issue"}`)
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	if !strings.Contains(out, `"result":7`) {
+		t.Fatalf("got %s", out)
+	}
+}
+
+func TestJSIdent(t *testing.T) {
+	for in, want := range map[string]string{
+		"get-issue":       "get_issue",
+		"score":           "score",
+		"a.b/c":           "a_b_c",
+		"2fast":           "_2fast",
+		"":                "_",
+		"already_fine$42": "already_fine$42",
+	} {
+		if got := JSIdent(in); got != want {
+			t.Errorf("JSIdent(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

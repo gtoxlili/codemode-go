@@ -34,6 +34,10 @@ import (
 
 // Tool is one tool of an MCP server: its declaration, and a binding that calls
 // it.
+//
+// Tool.Name is what the server calls it. Binding.Name is what a program calls
+// it, which is the same string unless it had to be rewritten to be a JavaScript
+// identifier.
 type Tool struct {
 	mcp.Tool
 	Binding codemode.Binding
@@ -48,18 +52,48 @@ func Tools(ctx context.Context, c *client.Client) ([]Tool, error) {
 	}
 	out := make([]Tool, 0, len(res.Tools))
 	for _, t := range res.Tools {
-		name := t.Name
+		remote := t.Name
 		out = append(out, Tool{
 			Tool: t,
 			Binding: codemode.Binding{
-				Name: name,
+				Name: JSIdent(remote),
 				Invoke: func(ctx context.Context, args string) (string, error) {
-					return call(ctx, c, name, args)
+					return call(ctx, c, remote, args)
 				},
 			},
 		})
 	}
 	return out, nil
+}
+
+// JSIdent rewrites an MCP tool name into something a program can write after a
+// dot. MCP names commonly contain hyphens, and `tools.get-issue({})` parses as
+// subtraction rather than a call; every rune outside [A-Za-z0-9_$] becomes an
+// underscore, and a leading digit gains one.
+//
+// Two names that differ only in the runes being rewritten collapse onto the
+// same identifier. [Tools] does not resolve that, since only the caller knows
+// what the tools are; [Catalog] prints identifiers, so a collision is visible
+// there as a repeated entry.
+func JSIdent(name string) string {
+	if name == "" {
+		return "_"
+	}
+	var b strings.Builder
+	for i, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r == '_', r == '$':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			if i == 0 {
+				b.WriteByte('_')
+			}
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
 }
 
 // Bindings pulls the bindings out, for [codemode.Options].
@@ -133,7 +167,7 @@ func Catalog(ts []Tool) string {
 	var sb strings.Builder
 	sb.WriteString("Tools callable from a program, as `await tools.name(args)`:\n")
 	for _, t := range ts {
-		fmt.Fprintf(&sb, "\n## %s\n", t.Name)
+		fmt.Fprintf(&sb, "\n## %s\n", t.Binding.Name)
 		if d := strings.TrimSpace(t.Description); d != "" {
 			sb.WriteString(d + "\n")
 		}
