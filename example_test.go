@@ -41,7 +41,7 @@ return {winner: top.handle, followers: top.followers};
 	fmt.Println(string(out))
 	// Output:
 	// checked 3 profiles
-	// {"followers":7000,"winner":"barbara"}
+	// {"winner":"barbara","followers":7000}
 }
 
 // A failed tool call rejects with a ToolCallError the program can catch, so one
@@ -77,7 +77,7 @@ return out;
 	out, _ := json.Marshal(res.Result)
 	fmt.Println(string(out))
 	// Output:
-	// {"failed":["search_web"],"hits":["a","b"]}
+	// {"hits":["a","b"],"failed":["search_web"]}
 }
 
 // The tool form: a name, a description, an argument schema, and a Call that

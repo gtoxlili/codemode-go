@@ -2,6 +2,7 @@ package codemode
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"runtime"
@@ -17,6 +18,15 @@ import (
 
 // Result is a successful run. HasResult is false when the program returned
 // undefined — it only brought logs back.
+//
+// Result holds the program's return value as the exact JSON the program
+// serialized (a json.RawMessage inside the any): object key order is the
+// program's own insertion order and survives the host's re-encoding verbatim.
+// The alternative — exporting the JS object into a Go map — throws that order
+// away and re-renders differently on every marshal, which is poison for
+// anything that compares or caches the rendered result (prompt caches, tests,
+// dedup). The field stays `any` so reflection-based schema hints still see an
+// open value rather than an opaque payload.
 type Result struct {
 	Logs      []string `json:"logs"`
 	Result    any      `json:"result,omitempty"`
@@ -257,20 +267,30 @@ func Run(ctx context.Context, code string, bindings []Binding, limits Limits, op
 		// fire-and-forget write that failed is the usual case — must not
 		// evaporate. Rejections still unhandled when the run settles are
 		// appended to the logs, so the model can see which call failed behind
-		// its back. The map is only touched on the loop thread.
+		// its back. Both structures are only touched on the loop thread.
+		// The slice keeps first-rejection order: flushing by map iteration
+		// would shuffle the log lines on every run, and the logs are
+		// model-visible output that must render deterministically.
 		unhandled := make(map[*goja.Promise]struct{})
+		var unhandledOrder []*goja.Promise
 		vm.SetPromiseRejectionTracker(func(p *goja.Promise, op goja.PromiseRejectionOperation) {
 			if op == goja.PromiseRejectionReject {
-				unhandled[p] = struct{}{}
+				if _, seen := unhandled[p]; !seen {
+					unhandled[p] = struct{}{}
+					unhandledOrder = append(unhandledOrder, p)
+				}
 			} else {
 				delete(unhandled, p)
 			}
 		})
 		flushUnhandled := func() {
-			for p := range unhandled {
-				logs.append("[unhandled rejection] " + p.Result().String())
+			for _, p := range unhandledOrder {
+				if _, still := unhandled[p]; still {
+					logs.append("[unhandled rejection] " + p.Result().String())
+				}
 			}
 			clear(unhandled)
+			unhandledOrder = unhandledOrder[:0]
 		}
 
 		// sleep is the only waiting primitive, implemented in Go so the sampler
@@ -336,21 +356,40 @@ func Run(ctx context.Context, code string, bindings []Binding, limits Limits, op
 					return
 				}
 				runOnLoop(func(vm *goja.Runtime) {
-					var v any
-					if err := dep.unmarshalString(r.out, &v); err != nil {
-						// A tool's contract is text, not necessarily JSON. If it
-						// does not parse, hand the program the raw string rather
-						// than calling the tool broken.
-						v = r.out
-					}
-					_ = resolve(vm.ToValue(v))
+					// Resolve with the raw result string; the JS-side tools
+					// wrapper JSON.parses it (see prelude). Parsing on the JS
+					// side keeps object key order equal to the document order —
+					// a Go-map round trip would randomize Object.keys() /
+					// JSON.stringify() inside the program on every run. A
+					// result that is not JSON stays a plain string, same as
+					// before: a tool's contract is text, not necessarily JSON.
+					_ = resolve(vm.ToValue(r.out))
 				})
 			}()
 			return vm.ToValue(promise)
 		})
 		vm.Set("__fulfill", func(call goja.FunctionCall) goja.Value {
 			flushUnhandled()
-			finish(engineResult{res: Result{Logs: logs.snapshot(), Result: call.Argument(0).Export(), HasResult: true}})
+			// The wrapper hands over the JSON string the program's value
+			// serialized to. Keeping it as raw JSON — instead of Export()ing
+			// the object into a Go map — preserves the program's own key
+			// order through every later re-encoding (see Result doc).
+			//
+			// Validate before trusting: __bridge is lexically reachable from
+			// the program (script-level const shares the global lexical
+			// environment; it is hidden from enumeration, not from naming),
+			// so a program can call __bridge.fulfill({a: 1}) directly and
+			// goja's .String() would smuggle "[object Object]" into the
+			// RawMessage — the host's encoder then fails far from the cause.
+			raw, isString := call.Argument(0).Export().(string)
+			if !isString || !json.Valid([]byte(raw)) {
+				finish(engineResult{res: Result{Logs: logs.snapshot()}, failed: &Failure{
+					Kind:    FailureInvalidReturn,
+					Message: "the completion value is not a JSON string; return plain JSON-serializable data from the program",
+				}})
+				return goja.Undefined()
+			}
+			finish(engineResult{res: Result{Logs: logs.snapshot(), Result: json.RawMessage(raw), HasResult: true}})
 			return goja.Undefined()
 		})
 		vm.Set("__fulfillEmpty", func(goja.FunctionCall) goja.Value {
@@ -385,10 +424,15 @@ func Run(ctx context.Context, code string, bindings []Binding, limits Limits, op
 		// numbers one higher than the source. The rejection handler recognizes
 		// the budget sentinels first: an Interrupt cannot be caught by the
 		// program but does arrive here as a rejection, and it is a timeout, not
-		// an exception.
+		// an exception. The fulfilled value crosses the bridge as the JSON
+		// string it serializes to — the string both validates losslessness and
+		// IS the result (see __fulfill); stringify returning undefined means a
+		// bare function/symbol, which is not lossless JSON either.
 		wrapped := "(async () => {\n" + code + "\n})().then(\n" +
 			"  (v) => { if (v === undefined) { __bridge.fulfillEmpty(); return; } " +
-			"try { __bridge.fulfill(JSON.parse(JSON.stringify(v))); } catch (e) { __bridge.invalidReturn(String(e)); } },\n" +
+			"let s; try { s = JSON.stringify(v); } catch (e) { __bridge.invalidReturn(String(e)); return; } " +
+			"if (s === undefined) { __bridge.invalidReturn('the value serializes to undefined'); return; } " +
+			"__bridge.fulfill(s); },\n" +
 			"  (e) => __bridge.programError(e == null ? 'null or undefined thrown' : " +
 			"String((e && e.stack) || e)),\n" +
 			");"
@@ -420,9 +464,11 @@ func Run(ctx context.Context, code string, bindings []Binding, limits Limits, op
 }
 
 // prelude builds the program's entire visible surface and then deletes the
-// bridge and the timer globals. __bridge is a lexical const, which does not
-// live on globalThis and does not show up in Reflect.ownKeys — the closures
-// still work, the program cannot reach them by name.
+// bridge and the timer globals. __bridge is a lexical const: it does not live
+// on globalThis and does not show up in Reflect.ownKeys, but scripts share the
+// global lexical environment, so a program that knows the name CAN still
+// reference it — hiding is against enumeration, not naming. Anything reachable
+// through it therefore validates its inputs (see __fulfill).
 const prelude = `const __bridge = {
   call: __call, log: __log, fulfill: __fulfill, fulfillEmpty: __fulfillEmpty,
   invalidReturn: __invalidReturn, programError: __programError, names: __toolNames,
@@ -456,7 +502,9 @@ for (const n of __bridge.names) {
         'tools.' + n + '(args): args must be one object matching the tool\'s parameter schema, got ' +
         (Array.isArray(a) ? 'an array' : typeof a)));
     }
-    return __bridge.call(n, JSON.stringify(a));
+    return __bridge.call(n, JSON.stringify(a)).then((s) => {
+      try { return JSON.parse(s); } catch (e) { return s; }
+    });
   };
 }
 const __mkToolCallError = (t, m) => new ToolCallError(t, m);`

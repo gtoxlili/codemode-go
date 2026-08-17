@@ -160,7 +160,7 @@ func TestSchedulerAbsorbsConflictKeysPanic(t *testing.T) {
 		Invoke:       func(context.Context, string) (string, error) { return `{"ok":true}`, nil },
 	}
 	res := mustRun(t, `const r = await tools.boom_keys({}); return r.ok;`, []Binding{b}, fastLimits())
-	if res.Result != true {
+	if raw, ok := res.Result.(json.RawMessage); !ok || string(raw) != "true" {
 		t.Fatalf("got %v", res.Result)
 	}
 }

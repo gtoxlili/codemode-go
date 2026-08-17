@@ -40,7 +40,7 @@ return "not reached";
 	if failure != nil {
 		t.Fatalf("unexpected failure: %v", failure)
 	}
-	if !strings.Contains(res.Result.(string), "batch shell work is one call") {
+	if raw, ok := res.Result.(json.RawMessage); !ok || !strings.Contains(string(raw), "batch shell work is one call") {
 		t.Fatalf("a blocked tool should explain itself, got %v", res.Result)
 	}
 }

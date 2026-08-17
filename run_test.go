@@ -68,6 +68,31 @@ func mustFail(t *testing.T, code string, bindings []Binding, limits Limits) (Res
 	return res, failure
 }
 
+// resultValue decodes the run result's raw JSON for assertions. The engine
+// carries the program's return value as json.RawMessage (document key order
+// preserved); tests that care about values, not bytes, decode through here.
+func resultValue(t *testing.T, res Result) any {
+	t.Helper()
+	raw, ok := res.Result.(json.RawMessage)
+	if !ok {
+		t.Fatalf("result is %T, want json.RawMessage", res.Result)
+	}
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		t.Fatalf("result is not valid JSON: %v (%s)", err, raw)
+	}
+	return v
+}
+
+func resultMap(t *testing.T, res Result) map[string]any {
+	t.Helper()
+	m, ok := resultValue(t, res).(map[string]any)
+	if !ok {
+		t.Fatalf("result is not an object: %v", res.Result)
+	}
+	return m
+}
+
 func asJSON(t *testing.T, v any) string {
 	t.Helper()
 	b, err := json.Marshal(v)
@@ -85,7 +110,7 @@ return {got: r.echo, name: r.tool};
 	if !res.HasResult {
 		t.Fatal("expected a result")
 	}
-	m := res.Result.(map[string]any)
+	m := resultMap(t, res)
 	if m["got"] != "42" || m["name"] != "echo" {
 		t.Fatalf("got %+v", m)
 	}
@@ -105,7 +130,7 @@ return {a: a.marker, b: b.marker};
 	if elapsed := time.Since(start); elapsed >= 350*time.Millisecond || elapsed < 190*time.Millisecond {
 		t.Fatalf("Promise.all should overlap the calls, took %s", elapsed)
 	}
-	m := res.Result.(map[string]any)
+	m := resultMap(t, res)
 	if m["a"] != "A" || m["b"] != "B" {
 		t.Fatalf("got %+v", m)
 	}
@@ -130,7 +155,7 @@ const fine = await tools.ok({});
 return {failed, fine: fine.echo};
 `, bindings, fastLimits())
 
-	m := res.Result.(map[string]any)
+	m := resultMap(t, res)
 	failed := m["failed"].(map[string]any)
 	if failed["tool"] != "boom" {
 		t.Fatalf("toolName = %v", failed["tool"])
@@ -249,7 +274,7 @@ func TestRunComputeBudgetIgnoresToolWaitTime(t *testing.T) {
 const r = await tools.slow({});
 return r.marker;
 `, []Binding{sleepBinding("slow", 3*time.Second, "done")}, limits)
-	if res.Result != "done" {
+	if resultValue(t, res) != "done" {
 		t.Fatalf("a 3s tool call must not burn a 500ms compute budget, got %v", res.Result)
 	}
 }
@@ -262,7 +287,7 @@ console.log("napping");
 await sleep(1200);
 return "woke";
 `, nil, limits)
-	if res.Result != "woke" {
+	if resultValue(t, res) != "woke" {
 		t.Fatalf("backing off must not burn the compute budget, got %v", res.Result)
 	}
 }
@@ -279,7 +304,7 @@ func TestRunMemoryBudgetSparesWaitingPrograms(t *testing.T) {
 	limits := fastLimits()
 	limits.MemoryBudgetBytes = 4 << 20
 	res := mustRun(t, `await sleep(900); return "unharmed";`, nil, limits)
-	if res.Result != "unharmed" {
+	if resultValue(t, res) != "unharmed" {
 		t.Fatalf("got %v", res.Result)
 	}
 }
@@ -349,7 +374,7 @@ out.ok = ok.args;
 return out;
 `, []Binding{echoBinding("echo", "x")}, fastLimits())
 
-	m := res.Result.(map[string]any)
+	m := resultMap(t, res)
 	if s := m["str"].(string); !strings.Contains(s, "TypeError") || !strings.Contains(s, "got string") {
 		t.Fatalf("string args should be rejected in the prelude: %s", s)
 	}
@@ -509,7 +534,7 @@ const has = {
 return {ambient: has, globals: names};
 `, []Binding{echoBinding("zzz_tool", "x")}, fastLimits())
 
-	m := res.Result.(map[string]any)
+	m := resultMap(t, res)
 	for name, typ := range m["ambient"].(map[string]any) {
 		if typ != "undefined" {
 			t.Errorf("global %s must not be visible, got %v", name, typ)
@@ -545,7 +570,7 @@ return {ambient: has, globals: names};
 func TestRunSleepHelper(t *testing.T) {
 	start := time.Now()
 	res := mustRun(t, `await sleep(120); return "woke";`, nil, fastLimits())
-	if res.Result != "woke" || time.Since(start) < 100*time.Millisecond {
+	if resultValue(t, res) != "woke" || time.Since(start) < 100*time.Millisecond {
 		t.Fatalf("got %v after %s", res.Result, time.Since(start))
 	}
 }
@@ -559,7 +584,7 @@ const r = await tools.plain({});
 return {got: r, type: typeof r};
 `, bindings, fastLimits())
 
-	m := res.Result.(map[string]any)
+	m := resultMap(t, res)
 	if m["got"] != "just text, not json" || m["type"] != "string" {
 		t.Fatalf("got %+v", m)
 	}
@@ -574,9 +599,38 @@ try { await tools.bad({}); } catch (e) { return {caught: e.message, tool: e.tool
 return "not reached";
 `, bindings, fastLimits())
 
-	m := res.Result.(map[string]any)
+	m := resultMap(t, res)
 	if !strings.Contains(m["caught"].(string), "host bug") || m["tool"] != "bad" {
 		t.Fatalf("got %+v", m)
+	}
+}
+
+// TestRunResultPreservesKeyOrder pins the whole point of carrying raw JSON:
+// the program's own insertion order survives into Result verbatim, so the
+// host's re-encoding renders identical bytes on every run — exporting into a
+// Go map would reshuffle keys per marshal and poison prompt caches and diffs.
+func TestRunResultPreservesKeyOrder(t *testing.T) {
+	res := mustRun(t, `return {zebra: 1, alpha: {beta: 2, aaa: 3}, mid: [{z: 1, a: 2}]};`, nil, fastLimits())
+	raw, ok := res.Result.(json.RawMessage)
+	if !ok {
+		t.Fatalf("result is %T, want json.RawMessage", res.Result)
+	}
+	want := `{"zebra":1,"alpha":{"beta":2,"aaa":3},"mid":[{"z":1,"a":2}]}`
+	if string(raw) != want {
+		t.Fatalf("got %s, want %s", raw, want)
+	}
+}
+
+// TestRunSubCallResultKeyOrderFollowsDocument pins the JS-side parse: the
+// program's Object.keys() over a sub-call result follows the tool's JSON
+// document order, not a Go map's random iteration order.
+func TestRunSubCallResultKeyOrderFollowsDocument(t *testing.T) {
+	b := Binding{Name: "doc", Invoke: func(context.Context, string) (string, error) {
+		return `{"zzz":1,"aaa":2,"mmm":3}`, nil
+	}}
+	res := mustRun(t, `const r = await tools.doc({}); return Object.keys(r).join(",");`, []Binding{b}, fastLimits())
+	if raw := res.Result.(json.RawMessage); string(raw) != `"zzz,aaa,mmm"` {
+		t.Fatalf("got %s", raw)
 	}
 }
 
@@ -590,5 +644,22 @@ func TestTailLogs(t *testing.T) {
 	}
 	if got := TailLogs(nil, 100); got != "" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+// TestRunDirectBridgeFulfillIsValidated pins the __fulfill defense: __bridge is
+// lexically reachable from programs (hidden from enumeration, not from naming),
+// so a direct __bridge.fulfill(nonString) must fail as invalid-return instead of
+// smuggling "[object Object]" into the raw JSON result.
+func TestRunDirectBridgeFulfillIsValidated(t *testing.T) {
+	_, failure := mustFail(t, `__bridge.fulfill({a: 1}); return "unreached";`, nil, fastLimits())
+	if failure.Kind != FailureInvalidReturn {
+		t.Fatalf("got %+v", failure)
+	}
+
+	// The legitimate wrapper path stays intact.
+	res := mustRun(t, `return {ok: true};`, nil, fastLimits())
+	if raw := res.Result.(json.RawMessage); string(raw) != `{"ok":true}` {
+		t.Fatalf("got %s", raw)
 	}
 }

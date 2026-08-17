@@ -57,9 +57,11 @@ func (c *stringCodec) stringCount() int {
 	return c.strings
 }
 
-// TestWithCodecDecodesSubCallResults pins that the injected codec — not
-// encoding/json — is what a program's view of a tool result comes through.
-func TestWithCodecDecodesSubCallResults(t *testing.T) {
+// TestSubCallResultsBypassTheCodec pins the JS-side parse: a sub-call result
+// crosses into the program as raw JSON text and is parsed by the engine's JS
+// prelude, so the host codec sees zero unmarshals from sub-calls — and the
+// program still reads the decoded value.
+func TestSubCallResultsBypassTheCodec(t *testing.T) {
 	codec := &countingCodec{}
 	res, failure := Run(context.Background(),
 		`const r = await tools.echo({x: 1}); return r.tool;`,
@@ -67,17 +69,18 @@ func TestWithCodecDecodesSubCallResults(t *testing.T) {
 	if failure != nil {
 		t.Fatalf("unexpected failure: %v", failure)
 	}
-	if res.Result != "echo" {
-		t.Fatalf("got %v, want the decoded result", res.Result)
+	if raw, ok := res.Result.(json.RawMessage); !ok || string(raw) != `"echo"` {
+		t.Fatalf("got %v, want the raw JSON string", res.Result)
 	}
-	if _, unmarshals := codec.counts(); unmarshals != 1 {
-		t.Fatalf("codec saw %d unmarshals, want exactly the one sub-call result", unmarshals)
+	if _, unmarshals := codec.counts(); unmarshals != 0 {
+		t.Fatalf("codec saw %d unmarshals; sub-call results parse on the JS side", unmarshals)
 	}
 }
 
-// TestCodecStringExtensionSkipsTheCopy pins the StringUnmarshaler fast path:
-// a codec that offers it must be asked through it, never through Unmarshal.
-func TestCodecStringExtensionSkipsTheCopy(t *testing.T) {
+// TestCodecStringExtensionUnusedByRun pins the same boundary from the string
+// side: Run itself never routes a sub-call result through the codec, string
+// extension or not. (The extension still serves argument decoding in NewTool.)
+func TestCodecStringExtensionUnusedByRun(t *testing.T) {
 	codec := &stringCodec{}
 	res, failure := Run(context.Background(),
 		`const a = await tools.echo({}); const b = await tools.echo({}); return a.tool + b.tool;`,
@@ -85,14 +88,14 @@ func TestCodecStringExtensionSkipsTheCopy(t *testing.T) {
 	if failure != nil {
 		t.Fatalf("unexpected failure: %v", failure)
 	}
-	if res.Result != "echoecho" {
+	if raw, ok := res.Result.(json.RawMessage); !ok || string(raw) != `"echoecho"` {
 		t.Fatalf("got %v", res.Result)
 	}
-	if got := codec.stringCount(); got != 2 {
-		t.Fatalf("UnmarshalString called %d times, want 2", got)
+	if got := codec.stringCount(); got != 0 {
+		t.Fatalf("UnmarshalString called %d times, want 0", got)
 	}
 	if _, unmarshals := codec.counts(); unmarshals != 0 {
-		t.Fatalf("Unmarshal called %d times; the string extension must take every sub-call result", unmarshals)
+		t.Fatalf("Unmarshal called %d times, want 0", unmarshals)
 	}
 }
 
@@ -106,7 +109,7 @@ func TestNilOptionsFallBackToDefaults(t *testing.T) {
 	if failure != nil {
 		t.Fatalf("unexpected failure: %v", failure)
 	}
-	if res.Result != "echo" {
+	if raw, ok := res.Result.(json.RawMessage); !ok || string(raw) != `"echo"` {
 		t.Fatalf("got %v", res.Result)
 	}
 }
@@ -139,7 +142,7 @@ func TestWithLoggerReceivesConflictKeysPanic(t *testing.T) {
 	if failure != nil {
 		t.Fatalf("unexpected failure: %v", failure)
 	}
-	if res.Result != true {
+	if raw, ok := res.Result.(json.RawMessage); !ok || string(raw) != "true" {
 		t.Fatalf("got %v, want the run to survive the panic", res.Result)
 	}
 
@@ -184,11 +187,11 @@ func TestToolThreadsDepsThroughOptions(t *testing.T) {
 	}
 	marshals, unmarshals := codec.counts()
 	// Marshal: the parameter schema + the run result. Unmarshal: the model's
-	// arguments + the one sub-call result.
+	// arguments only — sub-call results parse on the JS side, not through the codec.
 	if marshals != 2 {
 		t.Fatalf("codec saw %d marshals, want 2 (schema, result)", marshals)
 	}
-	if unmarshals != 2 {
-		t.Fatalf("codec saw %d unmarshals, want 2 (args, sub-call result)", unmarshals)
+	if unmarshals != 1 {
+		t.Fatalf("codec saw %d unmarshals, want 1 (args)", unmarshals)
 	}
 }

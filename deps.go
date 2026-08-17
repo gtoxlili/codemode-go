@@ -6,20 +6,22 @@ import (
 	"log/slog"
 )
 
-// Codec is the JSON implementation the engine uses: decoding a sub-call's
-// result before a program sees it, decoding the model's arguments, and encoding
-// the run result. It defaults to encoding/json.
+// Codec is the JSON implementation typed tools use: decoding the model's
+// arguments and encoding a typed tool's result. It defaults to encoding/json.
+// Sub-call results are not decoded in Go at all — they cross into the program
+// as raw JSON text and are parsed by the engine's JS side, which keeps object
+// key order equal to the document order (a Go-map round trip would randomize
+// it on every run).
 //
 // The reason to replace it is agreement rather than speed. A host whose tools
 // serialize through sonic, goccy or a configured jsoniter has already decided
-// things this engine would otherwise decide differently — how big integers
+// things this codec would otherwise decide differently — how big integers
 // survive a round trip, whether unknown fields are an error, how invalid UTF-8
-// is handled. Passing that codec in is what makes `r.data.x` inside a program
-// hold the same value the model would have seen from a direct call.
+// is handled.
 //
 // The two methods are encoding/json's, so most implementations already satisfy
-// it; a codec that also implements [StringUnmarshaler] skips a copy on the
-// sub-call path.
+// it; a codec that also implements [StringUnmarshaler] skips a copy when
+// decoding arguments.
 type Codec interface {
 	Marshal(v any) ([]byte, error)
 	Unmarshal(data []byte, v any) error
