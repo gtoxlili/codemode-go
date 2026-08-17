@@ -84,7 +84,7 @@ return out;
 // takes the model's raw argument JSON. Hand those to whatever tool-calling loop
 // you already have.
 func ExampleNewTool() {
-	tool := codemode.NewTool(codemode.Options{
+	tool, err := codemode.NewTool(codemode.Options{
 		Bindings: []codemode.Binding{{
 			Name:   "count_words",
 			Invoke: func(context.Context, string) (string, error) { return `{"count":42}`, nil },
@@ -94,6 +94,9 @@ func ExampleNewTool() {
 			Reason: "ask_user ends the turn, so a program cannot call it — ask before you start the program",
 		}},
 	})
+	if err != nil {
+		panic(err) // a name in both Bindings and Blocked, or listed twice
+	}
 
 	fmt.Println(tool.Name())
 	fmt.Println(tool.Description())

@@ -10,7 +10,7 @@ import (
 )
 
 func TestToolDescriptionListsWhatIsNotCallable(t *testing.T) {
-	tool := NewTool(Options{
+	tool := mustTool(t, Options{
 		Bindings: []Binding{echoBinding("search", "x")},
 		Blocked:  []Blocked{{Name: "ask_user"}, {Name: "execute_shell", Reason: "call it directly"}},
 	})
@@ -27,7 +27,7 @@ func TestToolDescriptionListsWhatIsNotCallable(t *testing.T) {
 }
 
 func TestToolBlockedCallsReturnGuidance(t *testing.T) {
-	tool := NewTool(Options{
+	tool := mustTool(t, Options{
 		Bindings: []Binding{echoBinding("search", "x")},
 		Blocked:  []Blocked{{Name: "execute_shell", Reason: "call execute_shell directly; batch shell work is one call with a shell script"}},
 		Limits:   fastLimits(),
@@ -46,7 +46,7 @@ return "not reached";
 }
 
 func TestToolCallReturnsLogsAndResult(t *testing.T) {
-	tool := NewTool(Options{Bindings: []Binding{echoBinding("echo", "42")}, Limits: fastLimits()})
+	tool := mustTool(t, Options{Bindings: []Binding{echoBinding("echo", "42")}, Limits: fastLimits()})
 	args := `{"code":"console.log('hi'); const r = await tools.echo({}); return r.echo;","description":"Echo once"}`
 
 	out, err := tool.Call(context.Background(), args)
@@ -66,7 +66,7 @@ func TestToolCallReturnsLogsAndResult(t *testing.T) {
 }
 
 func TestToolCallAttachesOutputToFailures(t *testing.T) {
-	tool := NewTool(Options{Limits: fastLimits()})
+	tool := mustTool(t, Options{Limits: fastLimits()})
 	args := `{"code":"console.log('made it this far'); throw new Error('kaboom');","description":"Fail"}`
 
 	_, err := tool.Call(context.Background(), args)
@@ -83,7 +83,7 @@ func TestToolCallAttachesOutputToFailures(t *testing.T) {
 }
 
 func TestToolCallRejectsEmptyCode(t *testing.T) {
-	tool := NewTool(Options{Limits: fastLimits()})
+	tool := mustTool(t, Options{Limits: fastLimits()})
 	if _, err := tool.Call(context.Background(), `{"code":"  ","description":"nothing"}`); err == nil {
 		t.Fatal("expected an error")
 	}
@@ -94,7 +94,7 @@ func TestToolCallRejectsEmptyCode(t *testing.T) {
 
 func TestToolOnProgramSeesTheDescription(t *testing.T) {
 	var gotCode, gotDesc string
-	tool := NewTool(Options{
+	tool := mustTool(t, Options{
 		Limits: fastLimits(),
 		OnProgram: func(_ context.Context, code, description string) {
 			gotCode, gotDesc = code, description
@@ -111,7 +111,7 @@ func TestToolOnProgramSeesTheDescription(t *testing.T) {
 func TestToolBoundsConcurrentRuns(t *testing.T) {
 	var mu sync.Mutex
 	var cur, peak int
-	tool := NewTool(Options{
+	tool := mustTool(t, Options{
 		MaxConcurrentRuns: 2,
 		Limits:            fastLimits(),
 		Bindings: []Binding{{Name: "work", Invoke: func(context.Context, string) (string, error) {
@@ -147,7 +147,7 @@ func TestToolBoundsConcurrentRuns(t *testing.T) {
 }
 
 func TestToolParametersAreValidJSONSchema(t *testing.T) {
-	tool := NewTool(Options{})
+	tool := mustTool(t, Options{})
 	var schema map[string]any
 	if err := json.Unmarshal(tool.ParametersJSON(), &schema); err != nil {
 		t.Fatalf("schema is not JSON: %v", err)
@@ -183,4 +183,41 @@ func TestPromptTracksToolNameAndShapes(t *testing.T) {
 	if !strings.Contains(p, "`Returns` line") {
 		t.Fatal("ReturnShapes should teach the Returns convention")
 	}
+}
+
+// A name reaching the program twice has no safe resolution, and the dangerous
+// case is a name in both lists: the description would call it uncallable while
+// the binding underneath still ran.
+func TestNewToolRejectsDuplicateNames(t *testing.T) {
+	_, err := NewTool(Options{
+		Bindings: []Binding{echoBinding("search", "a"), echoBinding("search", "b")},
+	})
+	if err == nil || !strings.Contains(err.Error(), "search") {
+		t.Fatalf("duplicate bindings should be reported, got %v", err)
+	}
+
+	_, err = NewTool(Options{
+		Bindings: []Binding{echoBinding("execute_shell", "a")},
+		Blocked:  []Blocked{{Name: "execute_shell", Reason: "call it directly"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "execute_shell") {
+		t.Fatalf("a name in both Bindings and Blocked should be reported, got %v", err)
+	}
+
+	// Distinct names in both lists are the ordinary case.
+	if _, err := NewTool(Options{
+		Bindings: []Binding{echoBinding("search", "a")},
+		Blocked:  []Blocked{{Name: "ask_user"}},
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func mustTool(t *testing.T, opts Options) *Tool {
+	t.Helper()
+	tool, err := NewTool(opts)
+	if err != nil {
+		t.Fatalf("NewTool: %v", err)
+	}
+	return tool
 }

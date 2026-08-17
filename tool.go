@@ -71,7 +71,11 @@ type Tool struct {
 // NewTool assembles the tool. The generated description enumerates Bindings and
 // Blocked as they are at this moment, so it is a snapshot: a tool added to the
 // model's tool list afterwards is not in it.
-func NewTool(opts Options) *Tool {
+//
+// It fails on a name that appears twice across Bindings and Blocked, since
+// there is no reading of that under which the description and the behavior
+// agree.
+func NewTool(opts Options) (*Tool, error) {
 	name := opts.Name
 	if name == "" {
 		name = DefaultToolName
@@ -87,6 +91,26 @@ func NewTool(opts Options) *Tool {
 	tail := opts.LogTailBytes
 	if tail <= 0 {
 		tail = 8000
+	}
+
+	// A name reaching the program twice has no safe resolution. The engine takes
+	// the first and drops the rest, so a duplicate silently decides which tool a
+	// program actually reaches, and a name in both Bindings and Blocked makes the
+	// description say "you cannot call this" about something that then runs.
+	// Tools discovered at runtime make this a data error rather than a typo,
+	// which is why it is returned rather than raised.
+	seen := make(map[string]struct{}, len(opts.Bindings)+len(opts.Blocked))
+	for _, b := range opts.Bindings {
+		if _, dup := seen[b.Name]; dup {
+			return nil, fmt.Errorf("codemode: duplicate tool name %q in Bindings", b.Name)
+		}
+		seen[b.Name] = struct{}{}
+	}
+	for _, b := range opts.Blocked {
+		if _, dup := seen[b.Name]; dup {
+			return nil, fmt.Errorf("codemode: %q is in both Bindings and Blocked; the description would call it uncallable while the program could still call it", b.Name)
+		}
+		seen[b.Name] = struct{}{}
 	}
 
 	bindings := make([]Binding, 0, len(opts.Bindings)+len(opts.Blocked))
@@ -116,7 +140,7 @@ func NewTool(opts Options) *Tool {
 		slots:        make(chan struct{}, runs),
 		onProgram:    opts.OnProgram,
 		logTailBytes: tail,
-	}
+	}, nil
 }
 
 // describe states what the tool is, which tools a program may call, and when to

@@ -60,6 +60,9 @@ type engineResult struct {
 // Every run gets a fresh VM and no state survives it. Canceling ctx settles the
 // run as FailureAborted and aborts sub-calls that are still in flight.
 //
+// Two bindings sharing a name is a caller error this level cannot report: the
+// first wins and the rest are dropped. [NewTool] rejects that case instead.
+//
 // Three invariants keep this from deadlocking, and all three are load-bearing:
 //
 //   - vm.Interrupt is called directly from the watchdog, never queued onto the

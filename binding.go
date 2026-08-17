@@ -30,8 +30,13 @@ type Binding struct {
 	// so the tool has to answer. Typical keys: a constant for a shared backend,
 	// "deck:"+id for a resource id, an absolute path for a file.
 	//
-	// nil means the call never conflicts with anything and always runs in the
-	// parallel pool. Panics are absorbed and treated as nil.
+	// Serialization needs a key from BOTH calls. A call with no keys conflicts
+	// with nothing and always runs in the parallel pool, so declaring them on
+	// the writers alone buys nothing: a write and a read of the same file will
+	// still overlap unless the reader names that file too. Every tool that
+	// touches a resource has to say so, not just the ones that change it.
+	//
+	// nil is the default. Panics are absorbed and treated as nil.
 	ConflictKeys func(args string) []string
 }
 
