@@ -48,7 +48,7 @@ The registry is the point. There is no protocol boundary in the middle: a `Bindi
 
 Mounting it is additive. Your tools stay in the model's tool list and keep working as direct calls; the model gains one more tool, and with it a second way to reach the same capabilities. The generated description says that as a set relation — *the tools callable in a program are exactly those in your current tool list, minus this one and minus what you blocked* — so nothing re-lists schemas the model already has, and adding a tool later costs nothing here. What that leaves on you: `Bindings` has to match what you actually mounted, because nothing in this library can see your tool list.
 
-`ConflictKeys` is on the readers as well as the writer, and it has to be: two calls serialize only when both of them name the same resource, so keys on the writer alone buy nothing and the read would still race. Your runtime is the only thing that can know a write to `src/a.go` must not overlap a read of it — the engine has no schema for your arguments and cannot infer it. With every file-touching tool declaring, reads of different files still overlap while calls landing on one file serialize in the order the program issued them. See [scheduling](#scheduling).
+`ConflictKeys` is what keeps a mixed batch safe: bindings declare which resource each call touches, so reads of different files still overlap while a write and a read of the same file serialize. Your runtime is the only thing that can know that — the engine has no schema for your arguments. See [scheduling](#scheduling) for the rules.
 
 One thing to know before wiring it in: the program runs in-process on goja and sees no filesystem, network or imports, but that is capability omission rather than isolation. This is not a security sandbox and is not meant for untrusted or multi-tenant programs; [what a program can see](#what-a-program-can-see) says exactly where the line falls.
 
@@ -58,7 +58,7 @@ Pulled out of an agent that has been running it in production.
 
 Code mode gives the model one tool that runs a program, and exposes the rest of its tools as an API that program can call. It goes by several names: [Anthropic](https://www.anthropic.com/engineering/code-execution-with-mcp) calls it code execution with MCP, [Cloudflare](https://blog.cloudflare.com/code-mode/) calls it Code Mode, the [CodeAct paper](https://arxiv.org/abs/2402.01030) calls it code-as-action.
 
-Most of what carries the name replaces tool calling with it: the model gets one `execute_code` tool and the rest disappear behind it. This one does not. It is a library you embed, the tools being projected are your own primitives, MCP is just one of the places they can come from, and the agent loop stays yours — the model keeps every tool it had and gains a second way to reach them. See [how it compares](#how-it-compares).
+Where implementations differ is what code execution is *for*. Many make it the primary path to tools — the model gets one `execute_code` and the rest are reached through it. This one is deliberately additive: it is a library you embed, your tool registry stays the source of truth, and the program tool only projects it. The model keeps every tool it had and gains a second way to reach the same capabilities. See [how it compares](#how-it-compares).
 
 ## Why
 
@@ -153,7 +153,7 @@ A bare name is a string, other types are annotated, `?` marks an omitempty field
 
 ## Adapters
 
-Separate modules, so the core stays at one dependency.
+Separate modules, so framework dependencies never enter the core's graph.
 
 ### eino
 
@@ -219,7 +219,9 @@ Code mode implementations get compared as one group when they sit at different l
 
 The tables are not a survey. They are the projects at the same abstraction boundary, which is the only place a comparison means anything. Standalone servers that sit in front of a pile of MCP servers answer a different question and are not alternatives to this one; see the [FAQ](#is-this-an-mcp-server-i-can-add-to-claude-code) for why the shapes do not swap.
 
-**What it is good at.** Pure Go, one process, no protocol boundary between the program and your tools, and nothing imposed on your agent loop. Of everything above, it is the only one that schedules on declared resource conflicts rather than just letting the calls run: `Mutating` and `ConflictKeys` are how a host says *this call writes file X*, and that is knowledge only the host has. What else comes in the box: the system-prompt section, a failure taxonomy phrased for the model to correct from, and hooks around every sub-call. A run costs one goja VM to start, which is microseconds, so a program that makes two calls is not a losing trade.
+**What it is good at.** Pure Go, one process, no protocol boundary between the program and your tools, and nothing imposed on your agent loop. It models resource conflicts explicitly rather than treating every concurrent call as independent: `Mutating` and `ConflictKeys` are how a host says *this call writes file X*, and that is knowledge only the host has. What else comes in the box: the system-prompt section, a failure taxonomy phrased for the model to correct from, and hooks around every sub-call.
+
+Starting a run costs one goja VM, which is microseconds — so when a program is the wrong choice for a two-call task, that is about the tokens spent writing it, not the runtime.
 
 **What it is not good at.** It is not a security boundary — see below, and if you need one, the WASM and container-backed options above are genuinely stronger. The model writes JavaScript, not Go, so your tools are reachable only through the bindings you pass; there is no way to hand a program a Go value directly. There is no typed SDK generation, so the model works from your tool descriptions rather than from TypeScript types with autocomplete — `ReturnShape` narrows that gap but does not close it. And a program shares the host process's memory, which is why the memory limit is a trip line with a documented margin of error rather than a hard ceiling.
 
@@ -279,6 +281,8 @@ Calls start in the order the program made them. Ordinary calls go into a pool of
 
 Keys come from the tool, not the runtime — the scheduler does not know any tool's parameter schema, so the tool is the only thing that can say what a given call touches. A constant works for a shared backend, `"deck:" + id` for a resource id, an absolute path for a file. Keys are compared as strings, so `out/a.jpg` and `./out/a.jpg` are two keys and the collision between them goes unseen.
 
+**Serialization needs a key from both calls.** A call with no keys conflicts with nothing, so declaring them on the writers alone buys nothing — a write and a read of the same file still overlap unless the reader names that file too. Every tool that touches a resource has to say so, not just the ones that change it.
+
 Conflicts are pruned as soon as a call finishes, since two calls can only conflict while they overlap. Without that, writing a digest and then reading a batch of files back — including the one just written — would serialize the whole read fan-out behind a write that is already done.
 
 ## FAQ
@@ -287,7 +291,7 @@ Conflicts are pruned as soon as a call finishes, since two calls can only confli
 
 No. It is a library for the agent you are building, not a server you register with someone else's client.
 
-That form does exist elsewhere, and it is structurally limited in a way worth knowing about: MCP is asymmetric. A server exposes tools; a client exposes roots, sampling and elicitation. Nothing in the protocol lets a server call back into the client, so a gateway can never touch Claude Code's Read, Edit or Bash — only the upstream servers it dials itself. Getting value from one means moving your MCP servers behind it and giving up calling them directly. That is a reasonable trade when a pile of MCP tools is your whole problem, and the wrong shape for making a runtime's own primitives programmable.
+That form does exist elsewhere, and it is structurally limited in a way worth knowing about: MCP is asymmetric. A server exposes tools; a client exposes roots, sampling and elicitation. Nothing in the protocol lets a server call back into the client, so a gateway can never touch Claude Code's Read, Edit or Bash — it can project only the capabilities it dials itself. That is the part no deployment choice works around, and it is what makes a gateway the wrong shape for making a runtime's own primitives programmable. If a pile of MCP tools is your whole problem, a gateway is a reasonable answer.
 
 ### Do my tools leave the model's tool list?
 
