@@ -15,11 +15,11 @@ type Limits struct {
 	WallClock      time.Duration
 	InterruptGrace time.Duration
 
-	// CPUBudget only accumulates while the program is running JavaScript — time
-	// spent waiting on tool calls or sleep does not count. A fan-out over
-	// twenty slow APIs does not burn it; a `while (true) {}` burns it in
-	// seconds, long before the wall clock.
-	CPUBudget time.Duration
+	// ComputeBudget only accumulates while the program is running JavaScript —
+	// time spent waiting on tool calls or sleep does not count, so this is not
+	// process CPU time. A fan-out over twenty slow APIs does not burn it; a
+	// `while (true) {}` burns it in seconds, long before the wall clock.
+	ComputeBudget time.Duration
 
 	// MemoryBudgetBytes trips when process heap growth relative to the run's
 	// baseline crosses it while the program is running. goja has no per-VM
@@ -61,7 +61,7 @@ func DefaultLimits() Limits {
 	return Limits{
 		WallClock:         10 * time.Minute,
 		InterruptGrace:    5 * time.Second,
-		CPUBudget:         2 * time.Minute,
+		ComputeBudget:     2 * time.Minute,
 		MemoryBudgetBytes: 256 << 20,
 		ResultBudgetBytes: 64 << 20,
 		MaxCallDepth:      8192,
@@ -81,8 +81,8 @@ func (l Limits) withDefaults() Limits {
 	if l.InterruptGrace <= 0 {
 		l.InterruptGrace = d.InterruptGrace
 	}
-	if l.CPUBudget <= 0 {
-		l.CPUBudget = d.CPUBudget
+	if l.ComputeBudget <= 0 {
+		l.ComputeBudget = d.ComputeBudget
 	}
 	if l.MemoryBudgetBytes <= 0 {
 		l.MemoryBudgetBytes = d.MemoryBudgetBytes
@@ -122,7 +122,7 @@ func (l Limits) Validate() error {
 	}{
 		{"WallClock", int64(l.WallClock)},
 		{"InterruptGrace", int64(l.InterruptGrace)},
-		{"CPUBudget", int64(l.CPUBudget)},
+		{"ComputeBudget", int64(l.ComputeBudget)},
 		{"MemoryBudgetBytes", l.MemoryBudgetBytes},
 		{"ResultBudgetBytes", l.ResultBudgetBytes},
 		{"MaxCallDepth", int64(l.MaxCallDepth)},

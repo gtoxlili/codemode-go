@@ -207,7 +207,7 @@ func TestRunTryCatchCannotSwallowTheInterrupt(t *testing.T) {
 	limits := fastLimits()
 	limits.WallClock = 250 * time.Millisecond
 	limits.InterruptGrace = 250 * time.Millisecond
-	limits.CPUBudget = time.Hour // keep the compute budget out of this test
+	limits.ComputeBudget = time.Hour // keep the compute budget out of this test
 	_, failure := mustFail(t, `
 try {
   while (true) {}
@@ -223,7 +223,7 @@ try {
 func TestRunComputeBudgetKillsHotLoopEarly(t *testing.T) {
 	limits := fastLimits()
 	limits.WallClock = 30 * time.Second
-	limits.CPUBudget = 300 * time.Millisecond
+	limits.ComputeBudget = 300 * time.Millisecond
 	start := time.Now()
 	res, failure := mustFail(t, `
 console.log("before loop");
@@ -244,7 +244,7 @@ while (true) { i++; }
 
 func TestRunComputeBudgetIgnoresToolWaitTime(t *testing.T) {
 	limits := fastLimits()
-	limits.CPUBudget = 500 * time.Millisecond
+	limits.ComputeBudget = 500 * time.Millisecond
 	res := mustRun(t, `
 const r = await tools.slow({});
 return r.marker;
@@ -256,7 +256,7 @@ return r.marker;
 
 func TestRunComputeBudgetIgnoresSleepWaitTime(t *testing.T) {
 	limits := fastLimits()
-	limits.CPUBudget = 400 * time.Millisecond
+	limits.ComputeBudget = 400 * time.Millisecond
 	res := mustRun(t, `
 console.log("napping");
 await sleep(1200);

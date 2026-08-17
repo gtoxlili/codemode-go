@@ -182,11 +182,11 @@ func Run(ctx context.Context, code string, bindings []Binding, limits Limits) (R
 					continue
 				}
 				busy += 50 * time.Millisecond
-				if busy >= limits.CPUBudget {
+				if busy >= limits.ComputeBudget {
 					if vm := vmRef.Load(); vm != nil {
 						vm.Interrupt(interruptComputeMark)
 					}
-					fail(FailureComputeLimit, "compute budget of %s exceeded", limits.CPUBudget)
+					fail(FailureComputeLimit, "compute budget of %s exceeded", limits.ComputeBudget)
 					hardStop()
 					return
 				}
