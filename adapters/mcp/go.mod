@@ -3,7 +3,7 @@ module github.com/gtoxlili/codemode-go/adapters/mcp
 go 1.25.5
 
 require (
-	github.com/gtoxlili/codemode-go v0.3.0
+	github.com/gtoxlili/codemode-go v0.4.0
 	github.com/mark3labs/mcp-go v0.58.0
 )
 

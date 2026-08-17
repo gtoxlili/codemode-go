@@ -68,7 +68,10 @@ func TestProgramFansOutOverMCPTools(t *testing.T) {
 		t.Fatalf("discovered %d tools", len(discovered))
 	}
 
-	ct := codemode.NewTool(codemode.Options{Bindings: Bindings(discovered)})
+	ct, err := codemode.NewTool(codemode.Options{Bindings: Bindings(discovered)})
+	if err != nil {
+		t.Fatalf("new tool: %v", err)
+	}
 	out, err := ct.Call(ctx, `{"code":"const rs = await Promise.all([1,2,3].map(id => tools.score({id}))); return rs.map(r => r.score);","description":"Score three candidates"}`)
 	if err != nil {
 		t.Fatalf("call: %v", err)
@@ -93,7 +96,10 @@ func TestToolErrorsRejectTheCall(t *testing.T) {
 		t.Fatalf("tools: %v", err)
 	}
 
-	ct := codemode.NewTool(codemode.Options{Bindings: Bindings(discovered)})
+	ct, err := codemode.NewTool(codemode.Options{Bindings: Bindings(discovered)})
+	if err != nil {
+		t.Fatalf("new tool: %v", err)
+	}
 	out, err := ct.Call(ctx, `{"code":"try { await tools.always_fails({}); } catch (e) { return {tool: e.toolName, msg: e.message}; } return 'not reached';","description":"Catch a failure"}`)
 	if err != nil {
 		t.Fatalf("call: %v", err)
@@ -130,13 +136,50 @@ func TestHyphenatedToolNamesAreCallable(t *testing.T) {
 		t.Fatalf("tools: %v", err)
 	}
 
-	ct := codemode.NewTool(codemode.Options{Bindings: Bindings(discovered)})
+	ct, err := codemode.NewTool(codemode.Options{Bindings: Bindings(discovered)})
+	if err != nil {
+		t.Fatalf("new tool: %v", err)
+	}
 	out, err := ct.Call(ctx, `{"code":"const r = await tools.get_issue({}); return r.issue;","description":"Fetch one issue"}`)
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
 	if !strings.Contains(out, `"result":7`) {
 		t.Fatalf("got %s", out)
+	}
+}
+
+// Rewriting can map two server-side names onto one identifier. Picking a winner
+// would run one tool whenever a program asked for the other, with nothing in the
+// result to say so.
+func TestCollidingIdentifiersAreReported(t *testing.T) {
+	s := server.NewMCPServer("test", "0.0.1", server.WithToolCapabilities(false))
+	handler := func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return mcp.NewToolResultText("{}"), nil
+	}
+	s.AddTool(mcp.NewTool("get-issue", mcp.WithDescription("hyphen")), handler)
+	s.AddTool(mcp.NewTool("get_issue", mcp.WithDescription("underscore")), handler)
+
+	c, err := client.NewInProcessClient(s)
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	if err := c.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if _, err := c.Initialize(context.Background(), mcp.InitializeRequest{}); err != nil {
+		t.Fatalf("initialize: %v", err)
+	}
+
+	_, err = Tools(context.Background(), c)
+	if err == nil {
+		t.Fatal("expected a collision error")
+	}
+	for _, want := range []string{"get-issue", "get_issue"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error should name both tools, got %v", err)
+		}
 	}
 }
 

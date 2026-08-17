@@ -4,13 +4,13 @@
 // The wiring when the server's tools are already in the model's tool list:
 //
 //	discovered, err := mcpcodemode.Tools(ctx, mcpClient)
-//	ct := codemode.NewTool(codemode.Options{Bindings: mcpcodemode.Bindings(discovered)})
+//	ct, err := codemode.NewTool(codemode.Options{Bindings: mcpcodemode.Bindings(discovered)})
 //
 // The wiring when they are not, where the per-turn cost is one tool description
 // rather than one schema per MCP tool:
 //
 //	catalog := mcpcodemode.Catalog(discovered)
-//	ct := codemode.NewTool(codemode.Options{
+//	ct, err := codemode.NewTool(codemode.Options{
 //	    Bindings:    mcpcodemode.Bindings(discovered),
 //	    Description: "Runs one JavaScript program that orchestrates the tools below with `await tools.name(args)`; " +
 //	        "only what the program prints or returns comes back to the conversation.\n\n" + catalog,
@@ -51,12 +51,23 @@ func Tools(ctx context.Context, c *client.Client) ([]Tool, error) {
 		return nil, fmt.Errorf("listing MCP tools: %w", err)
 	}
 	out := make([]Tool, 0, len(res.Tools))
+	taken := make(map[string]string, len(res.Tools))
 	for _, t := range res.Tools {
 		remote := t.Name
+		ident := JSIdent(remote)
+		// Rewriting can map two distinct tools onto one identifier, and the
+		// engine keeps the first binding under a name and drops the rest. That
+		// would silently run one tool whenever a program asked for the other,
+		// which is not a failure any caller could notice.
+		if prev, dup := taken[ident]; dup {
+			return nil, fmt.Errorf("tools %q and %q both become %q; rename one on the server", prev, remote, ident)
+		}
+		taken[ident] = remote
+
 		out = append(out, Tool{
 			Tool: t,
 			Binding: codemode.Binding{
-				Name: JSIdent(remote),
+				Name: ident,
 				Invoke: func(ctx context.Context, args string) (string, error) {
 					return call(ctx, c, remote, args)
 				},
@@ -72,9 +83,10 @@ func Tools(ctx context.Context, c *client.Client) ([]Tool, error) {
 // underscore, and a leading digit gains one.
 //
 // Two names that differ only in the runes being rewritten collapse onto the
-// same identifier. [Tools] does not resolve that, since only the caller knows
-// what the tools are; [Catalog] prints identifiers, so a collision is visible
-// there as a repeated entry.
+// same identifier. [Tools] reports that as an error rather than picking one,
+// since the alternative is a program silently reaching a tool it did not ask
+// for. Merging the tools of several servers is the caller's to do, and the same
+// check belongs there.
 func JSIdent(name string) string {
 	if name == "" {
 		return "_"
