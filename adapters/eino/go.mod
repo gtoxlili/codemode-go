@@ -5,7 +5,7 @@ go 1.25
 require (
 	github.com/cloudwego/eino v0.9.14
 	github.com/eino-contrib/jsonschema v1.0.3
-	github.com/gtoxlili/codemode-go v0.3.0
+	github.com/gtoxlili/codemode-go v0.4.0
 )
 
 require (

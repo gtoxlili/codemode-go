@@ -3,7 +3,7 @@
 // Two functions, used together:
 //
 //	bindings, err := einocodemode.Bindings(ctx, myTools)
-//	ct := codemode.NewTool(codemode.Options{Bindings: bindings})
+//	ct, err := codemode.NewTool(codemode.Options{Bindings: bindings})
 //	myTools = append(myTools, einocodemode.NewTool(ct))
 //
 // eino tools carry no notion of writing or of which resource they touch, so the
@@ -82,6 +82,19 @@ func (t *einoTool) Info(context.Context) (*schema.ToolInfo, error) {
 	}, nil
 }
 
+// InvokableRun returns a failed run as the tool's result rather than as an
+// error.
+//
+// eino's ToolsNode propagates a tool error up and aborts the graph; it does not
+// hand it to the model. Everything Call reports is written for the model to
+// correct from — the failure kind, what to do differently, the tail of what the
+// program printed — so surfacing it as an error would abort the agent over a
+// program the model could have fixed on the next turn, and the whole failure
+// taxonomy would never reach it.
 func (t *einoTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
-	return t.inner.Call(ctx, argumentsInJSON)
+	out, err := t.inner.Call(ctx, argumentsInJSON)
+	if err != nil {
+		return err.Error(), nil
+	}
+	return out, nil
 }

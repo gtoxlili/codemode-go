@@ -50,13 +50,37 @@ func TestBindingsRoundTripThroughAProgram(t *testing.T) {
 		t.Fatalf("bindings: %v", err)
 	}
 
-	ct := codemode.NewTool(codemode.Options{Bindings: bindings})
+	ct, err := codemode.NewTool(codemode.Options{Bindings: bindings})
+	if err != nil {
+		t.Fatalf("new tool: %v", err)
+	}
 	out, err := NewTool(ct).InvokableRun(ctx, `{"code":"const rs = await Promise.all([1,2,3].map(id => tools.lookup({id}))); return rs.reduce((n, r) => n + r.score, 0);","description":"Sum three scores"}`)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	if !strings.Contains(out, `"result":60`) {
 		t.Fatalf("got %s", out)
+	}
+}
+
+// eino's ToolsNode aborts the graph on a tool error, so a failed run has to come
+// back as the result. If it came back as an error the model would never see the
+// failure it was supposed to correct from.
+func TestFailedRunIsAResultNotAnError(t *testing.T) {
+	ctx := context.Background()
+	ct, err := codemode.NewTool(codemode.Options{})
+	if err != nil {
+		t.Fatalf("new tool: %v", err)
+	}
+
+	out, err := NewTool(ct).InvokableRun(ctx, `{"code":"console.log('got here'); throw new Error('kaboom');","description":"Fail on purpose"}`)
+	if err != nil {
+		t.Fatalf("a failed program must not surface as an error: %v", err)
+	}
+	for _, want := range []string{"exception", "kaboom", "got here"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the result should carry %q for the model to act on: %s", want, out)
+		}
 	}
 }
 
@@ -71,10 +95,13 @@ func TestBindingsRejectsNonInvokableTools(t *testing.T) {
 }
 
 func TestInfoCarriesNameDescriptionAndSchema(t *testing.T) {
-	ct := codemode.NewTool(codemode.Options{
+	ct, err := codemode.NewTool(codemode.Options{
 		Bindings: []codemode.Binding{{Name: "search", Invoke: func(context.Context, string) (string, error) { return "{}", nil }}},
 		Blocked:  []codemode.Blocked{{Name: "ask_user"}},
 	})
+	if err != nil {
+		t.Fatalf("new tool: %v", err)
+	}
 
 	info, err := NewTool(ct).Info(context.Background())
 	if err != nil {
