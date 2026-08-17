@@ -1,0 +1,10 @@
+# Workspaces are a local choice; the adapters resolve the root through a
+# replace directive, so nothing here needs one.
+go.work
+go.work.sum
+
+*.test
+*.out
+.idea/
+.vscode/
+.DS_Store
